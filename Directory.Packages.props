@@ -1,0 +1,40 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <OrleansVersion>10.3.1</OrleansVersion>
+    <MLNetVersion>5.0.0</MLNetVersion>
+    <ExtensionsVersion>10.0.12</ExtensionsVersion>
+  </PropertyGroup>
+  <ItemGroup Label="Orleans">
+    <PackageVersion Include="Microsoft.Orleans.Sdk" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Server" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Client" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Streaming" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Reminders" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Clustering.AzureStorage" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Reminders.AzureStorage" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.Persistence.AzureStorage" Version="$(OrleansVersion)" />
+    <PackageVersion Include="Microsoft.Orleans.TestingHost" Version="$(OrleansVersion)" />
+  </ItemGroup>
+  <ItemGroup Label="ML.NET">
+    <PackageVersion Include="Microsoft.ML" Version="$(MLNetVersion)" />
+    <PackageVersion Include="Microsoft.ML.LightGbm" Version="$(MLNetVersion)" />
+    <PackageVersion Include="Microsoft.ML.FastTree" Version="$(MLNetVersion)" />
+  </ItemGroup>
+  <ItemGroup Label="Storage">
+    <PackageVersion Include="Microsoft.Garnet" Version="2.2.0" />
+    <PackageVersion Include="StackExchange.Redis" Version="3.3.1" />
+    <PackageVersion Include="Azure.Storage.Blobs" Version="12.30.0" />
+    <PackageVersion Include="Azure.Data.Tables" Version="12.13.0" />
+  </ItemGroup>
+  <ItemGroup Label="Hosting">
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="$(ExtensionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="$(ExtensionsVersion)" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="$(ExtensionsVersion)" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.12" />
+  </ItemGroup>
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="xunit.v3" Version="4.0.1" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="$(ExtensionsVersion)" />
+  </ItemGroup>
+</Project>

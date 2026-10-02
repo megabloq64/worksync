@@ -1,0 +1,11 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" />
+    <PackageReference Include="Azure.Storage.Blobs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkSync.Domain\WorkSync.Domain.csproj" />
+    <ProjectReference Include="..\WorkSync.ML\WorkSync.ML.csproj" />
+  </ItemGroup>
+</Project>

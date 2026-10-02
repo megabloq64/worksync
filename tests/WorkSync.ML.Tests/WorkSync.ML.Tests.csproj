@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WorkSync.ML\WorkSync.ML.csproj" />
+    <ProjectReference Include="..\..\src\WorkSync.DataGen\WorkSync.DataGen.csproj" />
+    <ProjectReference Include="..\..\src\WorkSync.Storage\WorkSync.Storage.csproj" />
+  </ItemGroup>
+</Project>

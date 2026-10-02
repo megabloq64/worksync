@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WorkSync.Api/WorkSync.Api.csproj" />
+    <Project Path="src/WorkSync.Cli/WorkSync.Cli.csproj" />
+    <Project Path="src/WorkSync.DataGen/WorkSync.DataGen.csproj" />
+    <Project Path="src/WorkSync.Domain/WorkSync.Domain.csproj" />
+    <Project Path="src/WorkSync.Grains.Abstractions/WorkSync.Grains.Abstractions.csproj" />
+    <Project Path="src/WorkSync.Grains/WorkSync.Grains.csproj" />
+    <Project Path="src/WorkSync.Hosting/WorkSync.Hosting.csproj" />
+    <Project Path="src/WorkSync.ML/WorkSync.ML.csproj" />
+    <Project Path="src/WorkSync.Silo/WorkSync.Silo.csproj" />
+    <Project Path="src/WorkSync.Storage/WorkSync.Storage.csproj" />
+    <Project Path="src/WorkSync.Streams.Redis/WorkSync.Streams.Redis.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WorkSync.Api.Tests/WorkSync.Api.Tests.csproj" />
+    <Project Path="tests/WorkSync.Grains.Tests/WorkSync.Grains.Tests.csproj" />
+    <Project Path="tests/WorkSync.ML.Tests/WorkSync.ML.Tests.csproj" />
+  </Folder>
+</Solution>
