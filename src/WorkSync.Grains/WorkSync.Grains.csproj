@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Orleans.Sdk" />
+    <PackageReference Include="Microsoft.Orleans.Streaming" />
+    <PackageReference Include="Microsoft.Orleans.Reminders" />
+    <PackageReference Include="Microsoft.Orleans.Server" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkSync.Grains.Abstractions\WorkSync.Grains.Abstractions.csproj" />
+    <ProjectReference Include="..\WorkSync.ML\WorkSync.ML.csproj" />
+    <ProjectReference Include="..\WorkSync.Storage\WorkSync.Storage.csproj" />
+    <ProjectReference Include="..\WorkSync.DataGen\WorkSync.DataGen.csproj" />
+  </ItemGroup>
+</Project>

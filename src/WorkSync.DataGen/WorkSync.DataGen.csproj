@@ -1,0 +1,9 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkSync.Domain\WorkSync.Domain.csproj" />
+  </ItemGroup>
+</Project>

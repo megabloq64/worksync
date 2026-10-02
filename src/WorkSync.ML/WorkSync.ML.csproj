@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML" />
+    <PackageReference Include="Microsoft.Orleans.Sdk" />
+    <PackageReference Include="Microsoft.ML.LightGbm" />
+    <PackageReference Include="Microsoft.ML.FastTree" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkSync.Domain\WorkSync.Domain.csproj" />
+  </ItemGroup>
+</Project>

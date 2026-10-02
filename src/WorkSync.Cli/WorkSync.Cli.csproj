@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><AssemblyName>worksync</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Orleans.Client" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkSync.ML\WorkSync.ML.csproj" />
+    <ProjectReference Include="..\WorkSync.DataGen\WorkSync.DataGen.csproj" />
+    <ProjectReference Include="..\WorkSync.Storage\WorkSync.Storage.csproj" />
+    <ProjectReference Include="..\WorkSync.Hosting\WorkSync.Hosting.csproj" />
+  </ItemGroup>
+</Project>
