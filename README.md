@@ -10,9 +10,12 @@ OneDrive, Google Drive, Dropbox, Box) and predicts, for a new transfer:
 | **Throughput** | FastTree regression on `log(bytes/s)` | Expected MB/s |
 | **Slow-transfer anomaly** | Robust z-score of the duration residual (median/MAD) | "This transfer was 3.4× slower than expected" |
 | **Best time to start** | Duration + failure models swept over a horizon | Top start slots and a 24-hour heatmap |
+| **DTU cost** | Duration model × granted DTUs | Expected **DTU-hours** (P10–P90) |
+| **DTU allocation** | Duration + failure models swept over DTU sizes | Fastest, cheapest and **recommended** DTU count, given what the pool has free |
 
-Features: provider pair, regions and their distance class, total bytes, file count, average file size, concurrency,
-account tier, hour of day and day of week (UTC). Models retrain **continuously** from the event stream using a
+Features: provider pair, regions and their distance class, total bytes, file count, average file size, account tier,
+**granted DTUs, grant ratio (granted/requested), pool utilization at start, bytes per DTU**, hour of day and day of
+week (UTC). Models retrain **continuously** from the event stream using a
 champion/challenger policy, and every version is kept so you can roll back.
 
 Built on .NET 10, ML.NET 5, Project Orleans 10, Garnet and (in production) Azure Storage + Redis Streams.
@@ -90,7 +93,7 @@ and trains model v1 (a few seconds). Then:
 
 ```powershell
 $req = @{ sourceProvider='S3'; sourceRegion='UsEast'; destinationProvider='AzureBlob'; destinationRegion='EuWest';
-          totalBytes=50GB; fileCount=12000; concurrency=8; tier='Standard' }
+          totalBytes=50GB; fileCount=12000; requestedDtus=8; tier='Standard'; accountId='contoso' }
 Invoke-RestMethod http://localhost:5080/predict -Method Post -ContentType application/json -Body ($req | ConvertTo-Json)
 ```
 
@@ -98,7 +101,9 @@ The OpenAPI document is at `/openapi/v1.json`.
 
 | Endpoint | Description |
 |---|---|
-| `POST /predict[?startAt=]` | Duration (P10–P90), ETA, failure probability, throughput |
+| `POST /predict[?startAt=&assumeFullGrant=]` | Duration (P10–P90), ETA, failure probability, throughput, granted DTUs, DTU-hours |
+| `POST /predict/dtus[?startAt=&assumePoolAvailable=]` | Compare DTU allocations → fastest, most efficient, recommended |
+| `GET /accounts/{id}/dtus[?tier=]` | Account DTU pool: size, reserved, available, active reservations |
 | `POST /predict/best-time` | `{ request, from?, horizonHours=168, top=5, failurePenalty=2 }` → best slots + heatmap |
 | `POST /predict/anomaly` | Score a finished `TransferRecord` |
 | `POST /transfers`, `GET /transfers/{id}` | Start a simulated transfer; live progress, ETA, anomaly verdict |
@@ -107,7 +112,34 @@ The OpenAPI document is at `/openapi/v1.json`.
 | `GET /training/status`, `POST /training/run?reason=` | Retraining state and history; manual trigger (409 if busy) |
 
 Errors are RFC 7807 problem details: `503` + `Retry-After` until a model exists, `400` for invalid input, `404` for
-unknown versions or transfers.
+unknown versions or transfers, `409` when rolling back to a model built for an older feature schema.
+
+## Data Transfer Units (DTUs)
+
+A **DTU** is a fixed bundle of resources: 0.5 vCPU, 1 GiB memory and 12 MB/s of bandwidth (`Dtu` in
+`WorkSync.Domain`). Transfers run in parallel with **one worker per DTU**.
+
+- **Account pool.** Each account (`TransferRequest.AccountId`) has a pool sized by tier: Free 4, Standard 16,
+  Premium 64, Enterprise 256 (configurable via `Grains:DtuPoolSizes`). `DtuPoolGrain` (one per account) serializes
+  reservations, so concurrent transfers can never over-allocate.
+- **Per-transfer reservation.** A transfer asks for `RequestedDtus` (1–256) and is granted
+  `min(requested, available)`. A **partial grant** runs with fewer workers; a grant of 0 fails with `QuotaExceeded`.
+  Both the requested and the granted DTUs are recorded on `TransferStarted`, along with pool utilization at start.
+- **Release.** DTUs go back to the pool when the transfer completes or fails. Each reservation is a lease, renewed
+  to the planned duration + `Grains:DtuLeaseSlack`. Leases left by crashed transfers expire and are reclaimed.
+- **Diminishing returns.** Throughput is a soft minimum of the route cap (provider/region limits) and the DTU
+  capacity, with a per-DTU efficiency of `1/(1+0.04(n−1))`. Doubling DTUs helps a lot for small allocations and then
+  barely at all. Too many workers against a rate-limited provider (consumer drives tolerate ~8, object stores ~64)
+  raises failure risk, as does a busy pool. The models learn these effects from the events.
+- **Forecasts use the real grant.** For a transfer starting now, `/predict` scores with the DTUs the pool can grant
+  right now (`assumeFullGrant=true` ignores current usage). `DTU-hours = granted × duration`.
+- **Allocation advice.** `/predict/dtus` (CLI `dtu-advice`) scores standard sizes 1, 2, 4 … up to what the pool allows.
+  It reports the fastest, the most efficient (fewest DTU-hours), and a recommendation: the smallest allocation within
+  10% of the fastest.
+
+> **Breaking change.** DTUs replace `concurrency` and change the feature schema (v2). Bundles trained before this
+> change are refused (`IncompatibleModelException`). The cluster drops an incompatible champion and retrains;
+> for the CLI, delete `%LOCALAPPDATA%\WorkSync\models` (or point `--registry` elsewhere) and train again.
 
 ## Multi-silo (local)
 
@@ -126,13 +158,16 @@ Offline (works on CSV files and a local model folder):
   datagen   -o data.csv [-n 20000] [--days 30] [--seed 42] [--drift "Dropbox=0.5"]
   train     --data data.csv [--force]          # publish; promote only if it beats the champion
   evaluate  --data data.csv [--version N]
-  predict   -s S3 --source-region UsEast -d Dropbox --dest-region EuWest --size 25GB --files 4000 [--start <time>]
+  predict   -s S3 --source-region UsEast -d Dropbox --dest-region EuWest --size 25GB --files 4000
+            [--dtus 8] [--tier Standard] [--account default] [--start <time>] [--granted N] [--pool-utilization 0.5]
+  dtu-advice <same transfer options> [--available N]   # fastest / cheapest / recommended DTU count
   best-time <same transfer options> [--horizon 168] [--top 5]
   models list | models rollback <version>
 
 Cluster (connects as an Orleans client; Development → localhost gateway 30000):
   cluster status | cluster train [--reason ...] | cluster rollback <version>
   cluster simulate [-n 20000] [--rate 20] [--seed 42] [--drift "Dropbox=0.4"]
+  cluster dtus <account>                       # DTU pool usage and active reservations
 ```
 
 Try continuous retraining against drift: run the API, then
@@ -163,6 +198,8 @@ All settings live under the `WorkSync` section (appsettings, environment variabl
 | `Grains:Training:*` | | `Iterations`, `MinimumRecords`, `AnomalyQuantile`, … |
 | `Grains:Promotion:MinDurationImprovement` / `MaxAucRegression` | 0.01 / 0.02 | Champion/challenger thresholds |
 | `Grains:SimulationTimeCompression` | 3600 | Simulated transfers run this many times faster than real time |
+| `Grains:DtuPoolSizes` | Free 4, Standard 16, Premium 64, Enterprise 256 | DTU pool size per account tier |
+| `Grains:DtuLeaseSlack` | 2 min | Added to a reservation's lease beyond the planned duration |
 
 ### Production deployment
 
@@ -187,6 +224,6 @@ and API nodes, which either co-host silos or run as clients (`Api:CoHostSilo=fal
 
 ```powershell
 dotnet test --project tests\WorkSync.ML.Tests
-dotnet test --project tests\WorkSync.Grains.Tests   # 2-silo cluster + Garnet/in-memory store + registry
+dotnet test --project tests\WorkSync.Grains.Tests   # 2-silo cluster, DTU pools, Garnet/in-memory store, registry
 dotnet test --project tests\WorkSync.Api.Tests
 ```

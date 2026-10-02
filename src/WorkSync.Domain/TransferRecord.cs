@@ -11,6 +11,8 @@ public sealed record TransferRecord(
     FailureReason FailureReason,
     long BytesTransferred,
     int Retries,
+    int GrantedDtus,
+    double PoolUtilizationAtStart,
     double? PredictedDurationSeconds = null,
     int? ModelVersion = null)
 {
@@ -18,6 +20,9 @@ public sealed record TransferRecord(
 
     /// <summary>Observed throughput. Only meaningful for completed transfers.</summary>
     public double ThroughputBytesPerSecond => BytesTransferred / DurationSeconds;
+
+    /// <summary>Metered usage: the granted DTUs are reserved for the whole wall-clock duration.</summary>
+    public double DtuHours => GrantedDtus * DurationSeconds / 3600.0;
 }
 
 public static class TransferAggregator
@@ -49,15 +54,18 @@ public static class TransferAggregator
             return null;
         }
 
+        // Producers that don't report grants (older or external engines) are assumed to have received what they asked for.
+        var granted = started.GrantedDtus ?? started.Request.RequestedDtus;
+        var utilization = started.PoolUtilizationAtStart ?? 0;
         return terminal switch
         {
             TransferCompleted c => new TransferRecord(
                 started.TransferId, started.Request, started.Timestamp, c.Timestamp,
-                Failed: false, FailureReason.None, c.BytesTransferred, c.Retries,
+                Failed: false, FailureReason.None, c.BytesTransferred, c.Retries, granted, utilization,
                 started.PredictedDurationSeconds, started.ModelVersion),
             TransferFailed f => new TransferRecord(
                 started.TransferId, started.Request, started.Timestamp, f.Timestamp,
-                Failed: true, f.Reason, f.BytesTransferred, f.Retries,
+                Failed: true, f.Reason, f.BytesTransferred, f.Retries, granted, utilization,
                 started.PredictedDurationSeconds, started.ModelVersion),
             _ => null,
         };

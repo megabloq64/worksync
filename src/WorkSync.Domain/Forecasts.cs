@@ -10,6 +10,36 @@ public sealed record TransferForecast(
     DateTimeOffset EstimatedCompletion,
     double FailureProbability,
     double ExpectedThroughputBytesPerSecond,
+    int ModelVersion,
+    int GrantedDtus,
+    double DtuHoursExpected,
+    double DtuHoursP10,
+    double DtuHoursP90);
+
+/// <summary>One candidate DTU allocation evaluated by the DTU advisor.</summary>
+[GenerateSerializer, Immutable, Alias("worksync.DtuOption")]
+public sealed record DtuOption(
+    int Dtus,
+    TimeSpan ExpectedDuration,
+    TimeSpan DurationP90,
+    double DtuHours,
+    double FailureProbability,
+    double SpeedupVersusPrevious,
+    bool AvailableNow);
+
+/// <summary>
+/// How many DTUs to give a transfer. Extra DTUs hit diminishing returns (coordination overhead and provider
+/// throttling), so the fastest allocation is rarely the most economical one.
+/// </summary>
+[GenerateSerializer, Immutable, Alias("worksync.DtuAdvice")]
+public sealed record DtuAdvice(
+    IReadOnlyList<DtuOption> Options,
+    DtuOption Fastest,
+    DtuOption MostEfficient,
+    DtuOption Recommended,
+    int PoolSize,
+    int PoolAvailable,
+    string Note,
     int ModelVersion);
 
 /// <summary>Result of scoring a finished transfer for "this was unusually slow".</summary>

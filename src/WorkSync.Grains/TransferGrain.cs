@@ -21,13 +21,16 @@ public sealed class TransferGrainState
     [Id(10)] public AnomalyResult? Anomaly { get; set; }
     [Id(11)] public int ProgressEvents { get; set; }
     [Id(12)] public double TimeCompression { get; set; } = 1;
+    [Id(13)] public DtuGrant? Grant { get; set; }
+    [Id(14)] public bool DtusReleased { get; set; }
 }
 
 /// <summary>
 /// Runs one transfer: forecasts it, executes it (simulated, time-compressed), emits its event stream and exposes live
 /// status. Event timestamps are in simulated time (start + fraction × planned duration); wall-clock waits are divided by
 /// the compression factor. Each due event is emitted at most once per sequence number (the store de-duplicates
-/// redeliveries), and an interrupted transfer resumes on reactivation.
+/// redeliveries), and an interrupted transfer resumes on reactivation. DTUs are reserved from the account pool before
+/// the transfer is planned (a partial grant makes it slower) and released when it finishes.
 /// </summary>
 public sealed partial class TransferGrain(
     [PersistentState("transfer", "worksync")] IPersistentState<TransferGrainState> state,
@@ -42,10 +45,10 @@ public sealed partial class TransferGrain(
 
     private TransferGrainState S => state.State;
 
-    public override Task OnActivateAsync(CancellationToken cancellationToken)
+    public override async Task OnActivateAsync(CancellationToken cancellationToken)
     {
         if (S.State == TransferState.Running) StartTimer();
-        return Task.CompletedTask;
+        else if (S.State is TransferState.Completed or TransferState.Failed && !S.DtusReleased) await ReleaseDtusAsync();
     }
 
     public async Task<TransferStatus> StartAsync(TransferRequest request)
@@ -55,8 +58,13 @@ public sealed partial class TransferGrain(
 
         var now = clock.GetUtcNow();
         var o = options.Value;
-        var plan = executor.Plan(request, now);
+        var id = this.GetPrimaryKey();
+        var pool = GrainFactory.GetGrain<IDtuPoolGrain>(request.AccountId);
+        var grant = await pool.ReserveAsync(id, request.RequestedDtus, request.Tier, o.DtuLeaseSlack);
+        var plan = executor.Plan(request, now, grant.Granted, grant.UtilizationBefore);
         S.Request = request;
+        S.Grant = grant;
+        S.DtusReleased = grant.Granted == 0;
         S.StartedAt = now;
         S.PlannedDuration = plan.Duration;
         S.PlannedFailure = plan.Failed;
@@ -65,9 +73,10 @@ public sealed partial class TransferGrain(
         S.PlannedRetries = plan.Retries;
         S.ProgressEvents = Math.Max(0, o.SimulationProgressEvents);
         S.TimeCompression = Math.Max(1, o.SimulationTimeCompression);
-        S.Forecast = models.Current?.Forecast(request, now);
+        S.Forecast = models.Current?.Forecast(request, now, grant.Granted, grant.UtilizationBefore);
         S.State = TransferState.Running;
         S.NextSequence = 0;
+        if (grant.Granted > 0) await pool.RenewAsync(id, RealDuration + o.DtuLeaseSlack);
 
         await EmitDueEventsAsync();
         if (S.State == TransferState.Running) StartTimer();
@@ -84,6 +93,8 @@ public sealed partial class TransferGrain(
     }
 
     private TimeSpan RealDuration => S.PlannedDuration / S.TimeCompression;
+
+    private int Granted => S.Grant?.Granted ?? S.Request?.RequestedDtus ?? 0;
 
     private long TerminalSequence => S.ProgressEvents + 1;
 
@@ -112,8 +123,27 @@ public sealed partial class TransferGrain(
             _timer?.Dispose();
             _timer = null;
             if (!S.PlannedFailure) S.Anomaly = await TryScoreAsync(request);
+            await state.WriteStateAsync();
+            await ReleaseDtusAsync();
+            return;
         }
         await state.WriteStateAsync();
+    }
+
+    private async Task ReleaseDtusAsync()
+    {
+        if (S.DtusReleased || S.Request is not { } request) return;
+        try
+        {
+            await GrainFactory.GetGrain<IDtuPoolGrain>(request.AccountId).ReleaseAsync(this.GetPrimaryKey());
+            S.DtusReleased = true;
+            await state.WriteStateAsync();
+        }
+        catch (Exception ex)
+        {
+            // The reservation lease reclaims the DTUs eventually; retried on next activation.
+            LogReleaseFailed(ex, this.GetPrimaryKey());
+        }
     }
 
     private TransferEvent CreateEvent(TransferRequest request, long seq)
@@ -122,7 +152,8 @@ public sealed partial class TransferGrain(
         var at = SimulatedAt(seq);
         if (seq == 0)
         {
-            return new TransferStarted(EventId(seq), id, 0, at, request, S.Forecast?.ExpectedDuration.TotalSeconds, S.Forecast?.ModelVersion);
+            return new TransferStarted(EventId(seq), id, 0, at, request, S.Forecast?.ExpectedDuration.TotalSeconds, S.Forecast?.ModelVersion,
+                Granted, S.Grant?.UtilizationBefore ?? 0);
         }
         if (seq < TerminalSequence)
         {
@@ -146,7 +177,8 @@ public sealed partial class TransferGrain(
     private async Task<AnomalyResult?> TryScoreAsync(TransferRequest request)
     {
         var record = new TransferRecord(this.GetPrimaryKey(), request, S.StartedAt, S.StartedAt + S.PlannedDuration, false,
-            FailureReason.None, S.PlannedBytes, S.PlannedRetries, S.Forecast?.ExpectedDuration.TotalSeconds, S.Forecast?.ModelVersion);
+            FailureReason.None, S.PlannedBytes, S.PlannedRetries, Granted, S.Grant?.UtilizationBefore ?? 0,
+            S.Forecast?.ExpectedDuration.TotalSeconds, S.Forecast?.ModelVersion);
         try
         {
             return await GrainFactory.GetGrain<IPredictionGrain>(0).ScoreAnomalyAsync(record);
@@ -167,7 +199,7 @@ public sealed partial class TransferGrain(
         var id = this.GetPrimaryKey();
         if (S.Request is null)
         {
-            return new TransferStatus(id, TransferState.Pending, null, null, null, 0, null, null, FailureReason.None, null);
+            return new TransferStatus(id, TransferState.Pending, null, null, null, 0, null, null, FailureReason.None, null, null);
         }
 
         var done = S.State is TransferState.Completed or TransferState.Failed;
@@ -185,9 +217,12 @@ public sealed partial class TransferGrain(
         }
 
         return new TransferStatus(id, S.State, S.Request, S.StartedAt, endedAt, progress, S.Forecast, eta,
-            done && S.PlannedFailure ? S.PlannedReason : FailureReason.None, S.Anomaly);
+            done && S.PlannedFailure ? S.PlannedReason : FailureReason.None, S.Anomaly, S.Grant);
     }
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Anomaly scoring failed for transfer {TransferId}")]
     private partial void LogScoreFailed(Exception ex, Guid transferId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Releasing DTUs failed for transfer {TransferId}")]
+    private partial void LogReleaseFailed(Exception ex, Guid transferId);
 }

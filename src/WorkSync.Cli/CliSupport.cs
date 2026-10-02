@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.Globalization;
 using WorkSync.Domain;
+using WorkSync.Grains;
 
 namespace WorkSync.Cli;
 
@@ -13,8 +14,9 @@ internal sealed class TransferRequestOptions
     public Option<CloudRegion> DestinationRegion { get; } = new("--dest-region") { Description = "Destination region", Required = true };
     public Option<string> Size { get; } = new("--size") { Description = "Total size, e.g. 750MB, 50GB, 1.5TB", Required = true };
     public Option<int> Files { get; } = new("--files") { Description = "Number of files", Required = true };
-    public Option<int> Concurrency { get; } = new("--concurrency") { Description = "Parallel streams", DefaultValueFactory = _ => 4 };
-    public Option<AccountTier> Tier { get; } = new("--tier") { Description = "Account tier", DefaultValueFactory = _ => AccountTier.Standard };
+    public Option<int> Dtus { get; } = new("--dtus") { Description = $"Requested DTUs (1 worker each, 1-{Dtu.MaxPerTransfer})", DefaultValueFactory = _ => 8 };
+    public Option<AccountTier> Tier { get; } = new("--tier") { Description = "Account tier (sets the DTU pool size)", DefaultValueFactory = _ => AccountTier.Standard };
+    public Option<string> Account { get; } = new("--account") { Description = "Account whose DTU pool the transfer draws on", DefaultValueFactory = _ => "default" };
 
     public void AddTo(Command command)
     {
@@ -25,7 +27,7 @@ internal sealed class TransferRequestOptions
                 if (r.GetValueOrDefault<string>() is { } s && !ByteSize.TryParse(s, out _)) r.AddError($"Invalid size '{s}'. Use e.g. 750MB, 50GB, 1.5TB or a byte count.");
             });
         }
-        foreach (var o in new Option[] { Source, SourceRegion, Destination, DestinationRegion, Size, Files, Concurrency, Tier })
+        foreach (var o in new Option[] { Source, SourceRegion, Destination, DestinationRegion, Size, Files, Dtus, Tier, Account })
         {
             command.Options.Add(o);
         }
@@ -34,7 +36,7 @@ internal sealed class TransferRequestOptions
     public TransferRequest Bind(ParseResult r)
     {
         var request = new TransferRequest(r.GetValue(Source), r.GetValue(SourceRegion), r.GetValue(Destination), r.GetValue(DestinationRegion),
-            ByteSize.Parse(r.GetValue(Size)!), r.GetValue(Files), r.GetValue(Concurrency), r.GetValue(Tier));
+            ByteSize.Parse(r.GetValue(Size)!), r.GetValue(Files), r.GetValue(Dtus), r.GetValue(Tier), r.GetValue(Account)!);
         request.Validate();
         return request;
     }
@@ -100,6 +102,30 @@ internal static class Fmt
         Console.WriteLine($"Estimated completion {f.EstimatedCompletion:u}");
         Console.WriteLine($"Failure probability  {f.FailureProbability:P1}");
         Console.WriteLine($"Expected throughput  {ByteSize.Format(f.ExpectedThroughputBytesPerSecond)}/s");
+        Console.WriteLine($"DTUs granted         {f.GrantedDtus}");
+        Console.WriteLine($"DTU-hours            {f.DtuHoursExpected:0.###}  (P10 {f.DtuHoursP10:0.###} – P90 {f.DtuHoursP90:0.###})");
+    }
+
+    public static void DtuAdvice(DtuAdvice a)
+    {
+        Console.WriteLine($"Pool                 {a.PoolAvailable} of {a.PoolSize} DTUs available (model v{a.ModelVersion})");
+        Console.WriteLine("  DTUs  expected      P90           DTU-hours  speedup  risk    ");
+        foreach (var o in a.Options)
+        {
+            var tags = string.Join(",", new[] { o == a.Recommended ? "recommended" : null, o == a.Fastest ? "fastest" : null, o == a.MostEfficient ? "cheapest" : null, o.AvailableNow ? null : "not free now" }.OfType<string>());
+            Console.WriteLine($"  {o.Dtus,4}  {Duration(o.ExpectedDuration),-12}  {Duration(o.DurationP90),-12}  {o.DtuHours,9:0.###}  {o.SpeedupVersusPrevious,6:0.00}x  {o.FailureProbability,6:P1}  {tags}");
+        }
+        Console.WriteLine(a.Note);
+    }
+
+    public static void Pool(DtuPoolStatus p)
+    {
+        Console.WriteLine($"Account              {p.AccountId} ({p.Tier})");
+        Console.WriteLine($"Pool                 {p.Reserved}/{p.PoolSize} DTUs reserved, {p.Available} available ({p.Utilization:P0})");
+        foreach (var r in p.Reservations)
+        {
+            Console.WriteLine($"  {r.TransferId}  {r.Granted,4}/{r.Requested,-4} DTUs  since {r.ReservedAt:u}  lease until {r.LeaseExpiresAt:u}");
+        }
     }
 
     public static void Advice(BestTimeAdvice a)

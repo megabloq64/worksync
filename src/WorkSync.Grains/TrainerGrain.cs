@@ -80,9 +80,9 @@ public sealed partial class TrainerGrain(
             {
                 champion = ModelEvaluator.Evaluate(await registry.LoadAsync(cv), trained.Holdout);
             }
-            catch (ModelVersionNotFoundException)
+            catch (Exception ex) when (ex is ModelVersionNotFoundException or IncompatibleModelException)
             {
-                // Champion vanished from the registry; treat as no champion.
+                // Champion vanished from the registry or predates the current feature schema; treat as no champion.
             }
         }
 

@@ -28,38 +28,47 @@ public sealed class TransferPredictor
     public ModelBundle Bundle { get; }
     public int Version { get; }
 
-    public TransferForecast Forecast(TransferRequest request, DateTimeOffset startUtc)
+    /// <param name="grantedDtus">DTUs the pool can actually reserve; defaults to a full grant of the requested DTUs.</param>
+    /// <param name="poolUtilization">Fraction of the account pool already reserved at start.</param>
+    public TransferForecast Forecast(TransferRequest request, DateTimeOffset startUtc, int? grantedDtus = null, double poolUtilization = 0)
     {
         request.Validate();
-        var input = FeatureBuilder.FromRequest(request, startUtc);
+        var granted = Math.Clamp(grantedDtus ?? request.RequestedDtus, 0, request.RequestedDtus);
+        var input = FeatureBuilder.FromRequest(request, startUtc, granted, poolUtilization);
         var logDuration = Predict(_duration, input).Score;
         var pFail = Predict(_failure, input).Probability;
         var logThroughput = Predict(_throughput, input).Score;
 
         var m = Bundle.Manifest;
         var expected = TimeSpan.FromSeconds(Math.Exp(logDuration));
+        var p10 = TimeSpan.FromSeconds(Math.Exp(logDuration + m.ResidualP10));
+        var p90 = TimeSpan.FromSeconds(Math.Exp(logDuration + m.ResidualP90));
         return new TransferForecast(
             startUtc,
             expected,
-            TimeSpan.FromSeconds(Math.Exp(logDuration + m.ResidualP10)),
-            TimeSpan.FromSeconds(Math.Exp(logDuration + m.ResidualP90)),
+            p10,
+            p90,
             startUtc + expected,
             Math.Clamp(pFail, 0, 1),
             Math.Exp(logThroughput),
-            Version);
+            Version,
+            granted,
+            Dtu.Hours(granted, expected),
+            Dtu.Hours(granted, p10),
+            Dtu.Hours(granted, p90));
     }
 
-    /// <summary>(log duration, failure probability) only. Used by the advisor's hot loop.</summary>
-    public (double LogDuration, double FailureProbability) ScoreFast(TransferRequest request, DateTimeOffset startUtc)
+    /// <summary>(log duration, failure probability) only. Used by the advisors' hot loops. Assumes a full DTU grant unless told otherwise.</summary>
+    public (double LogDuration, double FailureProbability) ScoreFast(TransferRequest request, DateTimeOffset startUtc, int? grantedDtus = null, double poolUtilization = 0)
     {
-        var input = FeatureBuilder.FromRequest(request, startUtc);
+        var input = FeatureBuilder.FromRequest(request, startUtc, grantedDtus, poolUtilization);
         return (Predict(_duration, input).Score, Math.Clamp(Predict(_failure, input).Probability, 0, 1));
     }
 
     /// <summary>Scores a finished (or in-flight, using elapsed time) transfer against what the duration model expected.</summary>
     public AnomalyResult ScoreAnomaly(TransferRecord record)
     {
-        var input = FeatureBuilder.FromRequest(record.Request, record.StartedAt);
+        var input = FeatureBuilder.FromRecord(record);
         var logDuration = (double)Predict(_duration, input).Score;
         var m = Bundle.Manifest;
         var residual = Math.Log(record.DurationSeconds) - logDuration;

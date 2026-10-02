@@ -34,8 +34,8 @@ public sealed record SimulatedOutcome(TimeSpan Duration, bool Failed, FailureRea
 
 /// <summary>
 /// The "physics" used to make synthetic transfers look real. Effective bandwidth depends on the slower provider,
-/// distance, provider pairing, concurrency, tier, local-time congestion at both ends, and lognormal noise. Failure
-/// odds rise with size, small-file counts, consumer providers, the free tier, and peak hours.
+/// distance, provider pairing, granted DTUs (with diminishing returns), local-time congestion at both ends, and lognormal noise. Failure
+/// odds rise with size, small-file counts, consumer providers, the free tier, over-parallelism, pool pressure and peak hours.
 /// </summary>
 public static class TransferSimulator
 {
@@ -74,15 +74,6 @@ public static class TransferSimulator
         return weekend ? Math.Min(1.0, factor + 0.3) : factor;
     }
 
-    public static double TierFactor(AccountTier t) => t switch
-    {
-        AccountTier.Free => 0.45,
-        AccountTier.Standard => 1.0,
-        AccountTier.Premium => 1.35,
-        AccountTier.Enterprise => 1.7,
-        _ => 1.0,
-    };
-
     public static double DistanceFactor(RegionDistance d) => d switch
     {
         RegionDistance.SameRegion => 1.0,
@@ -90,22 +81,48 @@ public static class TransferSimulator
         _ => 0.42,
     };
 
-    /// <summary>Deterministic expected bandwidth in bytes/sec before noise.</summary>
-    public static double ExpectedBandwidth(TransferRequest r, DateTimeOffset startUtc, DriftProfile? drift = null)
+    /// <summary>
+    /// Parallel efficiency of n DTUs: each extra worker adds coordination, chunk-scheduling and provider throttling
+    /// overhead, so aggregate DTU capacity saturates (≈300 MB/s) instead of growing linearly.
+    /// </summary>
+    public static double DtuEfficiency(int dtus) => 1.0 / (1.0 + 0.04 * (Math.Max(1, dtus) - 1));
+
+    /// <summary>Most DTUs a provider pair tolerates before throttling noticeably raises failure odds.</summary>
+    public static int DtuTolerance(TransferRequest r) =>
+        r.SourceProvider.IsObjectStore() && r.DestinationProvider.IsObjectStore() ? 64 : 8;
+
+    /// <summary>Aggregate bandwidth the route (providers + network) can sustain regardless of DTUs, in MB/s.</summary>
+    public static double RouteCapMBps(TransferRequest r, DateTimeOffset startUtc, DriftProfile? drift = null)
     {
-        var mbps = Math.Min(BaseBandwidthMBps(r.SourceProvider), BaseBandwidthMBps(r.DestinationProvider));
+        var mbps = Math.Min(BaseBandwidthMBps(r.SourceProvider), BaseBandwidthMBps(r.DestinationProvider)) * 4;
         mbps *= DistanceFactor(r.Distance);
         mbps *= r.SourceProvider == r.DestinationProvider ? 1.25 : 1.0;
-        mbps *= Math.Min(4.0, 1 + 0.55 * Math.Log(r.Concurrency));
-        mbps *= TierFactor(r.Tier);
         // Congestion is felt at both ends; the source end dominates because reads are the bottleneck.
         mbps *= Math.Pow(Congestion(r.SourceRegion, startUtc), 0.7) * Math.Pow(Congestion(r.DestinationRegion, startUtc), 0.3);
         mbps *= (drift ?? DriftProfile.None).For(r);
+        return mbps;
+    }
+
+    /// <summary>Aggregate bandwidth the granted DTUs can drive, in MB/s.</summary>
+    public static double DtuCapacityMBps(int grantedDtus, CloudRegion sourceRegion, DateTimeOffset startUtc) =>
+        Math.Max(1, grantedDtus) * Dtu.BandwidthMBps * DtuEfficiency(grantedDtus) * Math.Pow(Congestion(sourceRegion, startUtc), 0.3);
+
+    /// <summary>
+    /// Deterministic expected bandwidth in bytes/sec before noise: a soft minimum of what the route allows and what
+    /// the granted DTUs can drive. <paramref name="grantedDtus"/> defaults to the requested DTUs (a full grant).
+    /// </summary>
+    public static double ExpectedBandwidth(TransferRequest r, DateTimeOffset startUtc, DriftProfile? drift = null, int? grantedDtus = null)
+    {
+        var route = RouteCapMBps(r, startUtc, drift);
+        var dtu = DtuCapacityMBps(grantedDtus ?? r.RequestedDtus, r.SourceRegion, startUtc);
+        const double p = 3;
+        var mbps = Math.Pow(Math.Pow(route, -p) + Math.Pow(dtu, -p), -1 / p);
         return mbps * MB;
     }
 
-    public static double FailureLogit(TransferRequest r, DateTimeOffset startUtc)
+    public static double FailureLogit(TransferRequest r, DateTimeOffset startUtc, int? grantedDtus = null, double poolUtilization = 0)
     {
+        var granted = Math.Max(1, grantedDtus ?? r.RequestedDtus);
         var gb = r.TotalBytes / (MB * 1024);
         var logit = -4.2;
         logit += 0.35 * Math.Log10(1 + gb);
@@ -114,32 +131,45 @@ public static class TransferSimulator
         logit += r.DestinationProvider.IsObjectStore() ? 0 : 0.45;
         logit += r.Tier == AccountTier.Free ? 0.7 : r.Tier == AccountTier.Enterprise ? -0.4 : 0;
         logit += r.Distance == RegionDistance.CrossContinent ? 0.3 : 0;
-        logit += r.Concurrency > 32 ? 0.4 : 0;
+        // Too many parallel workers trip provider throttling; a nearly exhausted pool means noisy neighbours.
+        logit += 0.5 * Math.Max(0, Math.Log2((double)granted / DtuTolerance(r)));
+        logit += 0.8 * Math.Pow(Math.Clamp(poolUtilization, 0, 1), 2);
         logit += (1 - Congestion(r.SourceRegion, startUtc)) * 1.6;
         return logit;
     }
 
     /// <summary>Deterministic expected duration (no noise, no retries).</summary>
-    public static double ExpectedDurationSeconds(TransferRequest r, DateTimeOffset startUtc, DriftProfile? drift = null) =>
-        2.0 + r.TotalBytes / ExpectedBandwidth(r, startUtc, drift) + PerFileOverhead(r, startUtc);
+    public static double ExpectedDurationSeconds(TransferRequest r, DateTimeOffset startUtc, DriftProfile? drift = null, int? grantedDtus = null) =>
+        2.0 + r.TotalBytes / ExpectedBandwidth(r, startUtc, drift, grantedDtus) + PerFileOverhead(r, startUtc, grantedDtus ?? r.RequestedDtus);
 
-    private static double PerFileOverhead(TransferRequest r, DateTimeOffset startUtc)
+    private static double PerFileOverhead(TransferRequest r, DateTimeOffset startUtc, int grantedDtus)
     {
         var perFile = Math.Max(PerFileOverheadSeconds(r.SourceProvider), PerFileOverheadSeconds(r.DestinationProvider));
-        // Per-file API calls are rate-limited harder when the source provider is busy.
-        return r.FileCount * perFile / Math.Min(r.Concurrency, Math.Max(1, r.FileCount)) / Math.Sqrt(Congestion(r.SourceRegion, startUtc));
+        // Each DTU runs one worker, so per-file API calls are spread over the granted workers; they are
+        // rate-limited harder when the source provider is busy.
+        return r.FileCount * perFile / Math.Min(Math.Max(1, grantedDtus), Math.Max(1, r.FileCount)) / Math.Sqrt(Congestion(r.SourceRegion, startUtc));
     }
 
-    public static SimulatedOutcome Simulate(TransferRequest r, DateTimeOffset startUtc, Random rng, DriftProfile? drift = null)
+    /// <param name="grantedDtus">DTUs actually reserved from the account pool (defaults to the requested DTUs).</param>
+    /// <param name="poolUtilization">Fraction of the account pool already reserved when this transfer started.</param>
+    public static SimulatedOutcome Simulate(
+        TransferRequest r, DateTimeOffset startUtc, Random rng, DriftProfile? drift = null, int? grantedDtus = null, double poolUtilization = 0)
     {
-        var bandwidth = ExpectedBandwidth(r, startUtc, drift) * LogNormal(rng, 0, 0.18);
-        var seconds = 2.0 + r.TotalBytes / bandwidth + PerFileOverhead(r, startUtc);
+        var granted = grantedDtus ?? r.RequestedDtus;
+        if (granted <= 0)
+        {
+            // Nothing could be reserved: the engine refuses the transfer immediately.
+            return new SimulatedOutcome(TimeSpan.FromSeconds(1), Failed: true, FailureReason.QuotaExceeded, 0, 0);
+        }
+
+        var bandwidth = ExpectedBandwidth(r, startUtc, drift, granted) * LogNormal(rng, 0, 0.18);
+        var seconds = 2.0 + r.TotalBytes / bandwidth + PerFileOverhead(r, startUtc, granted);
 
         var throttleOdds = 1 - Congestion(r.SourceRegion, startUtc) + (r.SourceProvider.IsObjectStore() ? 0 : 0.25);
         var retries = Poisson(rng, Math.Clamp(throttleOdds * Math.Log10(2 + r.FileCount) * 0.8, 0, 6));
         seconds += retries * (5 + rng.NextDouble() * 25);
 
-        var pFail = 1 / (1 + Math.Exp(-FailureLogit(r, startUtc)));
+        var pFail = 1 / (1 + Math.Exp(-FailureLogit(r, startUtc, granted, poolUtilization)));
         if (rng.NextDouble() < pFail)
         {
             var progress = rng.NextDouble();

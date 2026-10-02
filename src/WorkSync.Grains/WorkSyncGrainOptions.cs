@@ -1,3 +1,4 @@
+using WorkSync.Domain;
 using WorkSync.ML;
 
 namespace WorkSync.Grains;
@@ -47,6 +48,15 @@ public sealed class WorkSyncGrainOptions
 
     /// <summary>Optional drift injected into simulated transfers, e.g. "Dropbox=0.5".</summary>
     public string? SimulationDrift { get; set; }
+
+    /// <summary>DTU pool size per account tier. Tiers not listed use <see cref="Dtu.DefaultPoolSize"/>.</summary>
+    public Dictionary<AccountTier, int> DtuPoolSizes { get; set; } = [];
+
+    /// <summary>Extra time a DTU reservation is held beyond the transfer's expected (real-time) duration before it is reclaimed.</summary>
+    public TimeSpan DtuLeaseSlack { get; set; } = TimeSpan.FromMinutes(2);
+
+    public int PoolSizeFor(AccountTier tier) =>
+        DtuPoolSizes.TryGetValue(tier, out var size) && size > 0 ? size : Dtu.DefaultPoolSize(tier);
 
     public TrainingSettings Training { get; set; } = new();
 

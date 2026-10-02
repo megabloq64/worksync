@@ -49,8 +49,20 @@ public sealed partial class TrainingCoordinatorGrain(
         this.RegisterGrainTimer(CheckAsync, new GrainTimerCreationOptions(_options.TriggerCheckInterval, _options.TriggerCheckInterval) { KeepAlive = true });
         _nextCheck = clock.GetUtcNow() + _options.TriggerCheckInterval;
 
+        // A champion trained on an older feature schema can no longer score requests: forget it so a fresh model is trained.
+        if (S.ChampionVersion is { } champion && await registry.GetManifestAsync(champion, cancellationToken) is { } manifest &&
+            !ModelBundle.IsCompatible(manifest))
+        {
+            LogIncompatibleChampion(champion, manifest.FeatureSchemaVersion, FeatureBuilder.SchemaVersion);
+            S.ChampionVersion = null;
+            S.BaselineMaeLog = null;
+            S.BaselineMeanLogBytes = null;
+            await state.WriteStateAsync(cancellationToken);
+        }
+
         // Adopt a model that was published out-of-band (CLI, seeding) if we don't know a champion yet.
-        if (S.ChampionVersion is null && await registry.GetCurrentVersionAsync(cancellationToken) is { } current)
+        if (S.ChampionVersion is null && await registry.GetCurrentVersionAsync(cancellationToken) is { } current &&
+            await registry.GetManifestAsync(current, cancellationToken) is { } currentManifest && ModelBundle.IsCompatible(currentManifest))
         {
             await AdoptChampionAsync(current, cancellationToken);
             await state.WriteStateAsync(cancellationToken);
@@ -130,6 +142,8 @@ public sealed partial class TrainingCoordinatorGrain(
 
     public async Task RollbackAsync(int version)
     {
+        var manifest = await registry.GetManifestAsync(version) ?? throw new ModelVersionNotFoundException(version);
+        ModelBundle.EnsureCompatible(manifest, $"v{version}");
         await registry.SetCurrentVersionAsync(version);
         await AdoptChampionAsync(version, CancellationToken.None);
         ResetAccumulators();
@@ -211,6 +225,7 @@ public sealed partial class TrainingCoordinatorGrain(
     private async Task AdoptChampionAsync(int version, CancellationToken ct)
     {
         var manifest = await registry.GetManifestAsync(version, ct) ?? throw new ModelVersionNotFoundException(version);
+        ModelBundle.EnsureCompatible(manifest, $"v{version}");
         S.ChampionVersion = version;
         S.BaselineMaeLog = manifest.Metrics.Duration.MaeLog;
         S.BaselineMeanLogBytes = manifest.TrainingMeanLogBytes;
@@ -254,6 +269,9 @@ public sealed partial class TrainingCoordinatorGrain(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Ignoring result of stale training run {RunId}")]
     private partial void LogStaleResult(Guid runId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Champion v{Version} uses feature schema v{Schema} but this build needs v{Expected}; it will be replaced by a newly trained model")]
+    private partial void LogIncompatibleChampion(int version, int schema, int expected);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to push model v{Version} to silo {Silo}")]
     private partial void LogPushFailed(Exception ex, string silo, int version);
