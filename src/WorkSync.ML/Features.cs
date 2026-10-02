@@ -19,7 +19,11 @@ public sealed class TransferModelInput
     public float LogBytes { get; set; }
     public float LogFileCount { get; set; }
     public float LogAvgFileSize { get; set; }
-    public float LogConcurrency { get; set; }
+    // DTU allocation: the workers actually granted (not merely requested) drive throughput.
+    public float LogGrantedDtus { get; set; }
+    public float GrantRatio { get; set; }
+    public float PoolUtilizationAtStart { get; set; }
+    public float LogBytesPerDtu { get; set; }
 
     public float SourceLocalHour { get; set; }
     public float SourceHourSin { get; set; }
@@ -58,13 +62,20 @@ public static class FeatureBuilder
     public static readonly string[] NumericColumns =
         [nameof(TransferModelInput.SameProvider), nameof(TransferModelInput.SourceIsObjectStore), nameof(TransferModelInput.DestinationIsObjectStore),
          nameof(TransferModelInput.LogBytes), nameof(TransferModelInput.LogFileCount), nameof(TransferModelInput.LogAvgFileSize),
-         nameof(TransferModelInput.LogConcurrency), nameof(TransferModelInput.SourceLocalHour), nameof(TransferModelInput.SourceHourSin),
+         nameof(TransferModelInput.LogGrantedDtus), nameof(TransferModelInput.GrantRatio), nameof(TransferModelInput.PoolUtilizationAtStart),
+         nameof(TransferModelInput.LogBytesPerDtu), nameof(TransferModelInput.SourceLocalHour), nameof(TransferModelInput.SourceHourSin),
          nameof(TransferModelInput.SourceHourCos), nameof(TransferModelInput.SourceDayOfWeek), nameof(TransferModelInput.SourceIsWeekend),
          nameof(TransferModelInput.SourceIsBusinessHours), nameof(TransferModelInput.DestinationLocalHour),
          nameof(TransferModelInput.DestinationIsWeekend), nameof(TransferModelInput.DestinationIsBusinessHours)];
 
-    public static TransferModelInput FromRequest(TransferRequest r, DateTimeOffset startUtc)
+    /// <summary>Bump whenever the feature columns change; bundles trained on another schema cannot score these rows.</summary>
+    public const int SchemaVersion = 2;
+
+    /// <param name="grantedDtus">DTUs reserved for the transfer; defaults to a full grant of the requested DTUs.</param>
+    /// <param name="poolUtilization">Fraction of the account pool already reserved when the transfer starts.</param>
+    public static TransferModelInput FromRequest(TransferRequest r, DateTimeOffset startUtc, int? grantedDtus = null, double poolUtilization = 0)
     {
+        var granted = Math.Max(0, grantedDtus ?? r.RequestedDtus);
         var srcLocal = Regions.ToLocalTime(r.SourceRegion, startUtc);
         var dstLocal = Regions.ToLocalTime(r.DestinationRegion, startUtc);
         var srcHour = srcLocal.Hour + srcLocal.Minute / 60.0;
@@ -85,7 +96,10 @@ public static class FeatureBuilder
             LogBytes = (float)Math.Log(Math.Max(1, r.TotalBytes)),
             LogFileCount = (float)Math.Log(Math.Max(1, r.FileCount)),
             LogAvgFileSize = (float)Math.Log(Math.Max(1, r.AverageFileSizeBytes)),
-            LogConcurrency = (float)Math.Log(Math.Max(1, r.Concurrency)),
+            LogGrantedDtus = (float)Math.Log(Math.Max(1, granted)),
+            GrantRatio = (float)Math.Clamp((double)granted / Math.Max(1, r.RequestedDtus), 0, 1),
+            PoolUtilizationAtStart = (float)Math.Clamp(poolUtilization, 0, 1),
+            LogBytesPerDtu = (float)Math.Log(Math.Max(1.0, (double)r.TotalBytes / Math.Max(1, granted))),
             SourceLocalHour = (float)srcHour,
             SourceHourSin = (float)Math.Sin(angle),
             SourceHourCos = (float)Math.Cos(angle),
@@ -104,7 +118,7 @@ public static class FeatureBuilder
 
     public static TransferModelInput FromRecord(TransferRecord record, float weight = 1f)
     {
-        var input = FromRequest(record.Request, record.StartedAt);
+        var input = FromRequest(record.Request, record.StartedAt, record.GrantedDtus, record.PoolUtilizationAtStart);
         input.LogDuration = (float)Math.Log(record.DurationSeconds);
         input.Failed = record.Failed;
         input.LogThroughput = (float)Math.Log(Math.Max(1, record.ThroughputBytesPerSecond));

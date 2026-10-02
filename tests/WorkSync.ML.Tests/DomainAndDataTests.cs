@@ -53,6 +53,59 @@ public sealed class DomainAndDataTests
     }
 
     [Fact]
+    public void Generator_never_overallocates_a_pool_and_grants_partially_under_contention()
+    {
+        var records = new WorkloadGenerator(new WorkloadOptions { Seed = 21, AccountCount = 5 }).GenerateRecords(3000, From, To).ToArray();
+
+        foreach (var account in records.GroupBy(r => r.Request.AccountId))
+        {
+            var pool = Dtu.DefaultPoolSize(account.First().Request.Tier);
+            Assert.All(account, r => Assert.Equal(pool, Dtu.DefaultPoolSize(r.Request.Tier)));
+            foreach (var r in account)
+            {
+                var reserved = account.Where(o => o.StartedAt <= r.StartedAt && o.EndedAt > r.StartedAt).Sum(o => o.GrantedDtus);
+                Assert.True(reserved <= pool, $"{account.Key} had {reserved}/{pool} DTUs reserved at {r.StartedAt:O}");
+            }
+        }
+
+        Assert.All(records, r => Assert.InRange(r.GrantedDtus, 0, r.Request.RequestedDtus));
+        Assert.All(records, r => Assert.InRange(r.PoolUtilizationAtStart, 0, 1));
+        Assert.Contains(records, r => r.GrantedDtus > 0 && r.GrantedDtus < r.Request.RequestedDtus);
+        Assert.All(records.Where(r => r.GrantedDtus == 0), r =>
+        {
+            Assert.True(r.Failed);
+            Assert.Equal(FailureReason.QuotaExceeded, r.FailureReason);
+        });
+    }
+
+    [Fact]
+    public void Simulated_dtus_have_diminishing_returns()
+    {
+        var request = new TransferRequest(CloudProvider.S3, CloudRegion.UsEast, CloudProvider.AzureBlob, CloudRegion.UsEast, 100L << 30, 1000);
+        var night = new DateTimeOffset(2026, 9, 2, 7, 0, 0, TimeSpan.Zero);
+        double Seconds(int dtus) => TransferSimulator.ExpectedDurationSeconds(request, night, grantedDtus: dtus);
+        double[] s = [Seconds(1), Seconds(2), Seconds(4), Seconds(8), Seconds(16), Seconds(32), Seconds(64), Seconds(128), Seconds(256)];
+        for (var i = 1; i < s.Length; i++)
+        {
+            Assert.True(s[i] < s[i - 1], $"more DTUs should be faster (step {i})");
+            Assert.True(s[i] > s[i - 1] / 2, $"doubling DTUs must not more than double speed (step {i})");
+        }
+        Assert.True(TransferSimulator.FailureLogit(request with { RequestedDtus = 256 }, night) > TransferSimulator.FailureLogit(request with { RequestedDtus = 64 }, night));
+        Assert.True(TransferSimulator.FailureLogit(request, night, poolUtilization: 0.95) > TransferSimulator.FailureLogit(request, night));
+    }
+
+    [Fact]
+    public void Request_validation_covers_dtus_and_account()
+    {
+        var ok = new TransferRequest(CloudProvider.S3, CloudRegion.UsEast, CloudProvider.S3, CloudRegion.UsEast, 1 << 20, 1);
+        ok.Validate();
+        Assert.Throws<ArgumentOutOfRangeException>(() => (ok with { RequestedDtus = 0 }).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() => (ok with { RequestedDtus = Dtu.MaxPerTransfer + 1 }).Validate());
+        Assert.Throws<ArgumentException>(() => (ok with { AccountId = "" }).Validate());
+        Assert.Throws<ArgumentException>(() => (ok with { AccountId = "bad/id" }).Validate());
+    }
+
+    [Fact]
     public void Drift_profile_parses_and_rejects_garbage()
     {
         var drift = DriftProfile.Parse("dropbox=0.5, S3=0.8");

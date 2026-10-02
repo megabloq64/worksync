@@ -31,12 +31,20 @@ app.MapOpenApi();
 
 var predict = app.MapGroup("/predict").WithTags("Predictions");
 
-predict.MapPost("/", (TransferRequest request, DateTimeOffset? startAt, IGrainFactory grains) =>
+predict.MapPost("/", (TransferRequest request, DateTimeOffset? startAt, bool? assumeFullGrant, IGrainFactory grains) =>
 {
     request.Validate();
-    return grains.GetGrain<IPredictionGrain>(0).ForecastAsync(request, startAt);
+    return grains.GetGrain<IPredictionGrain>(0).ForecastAsync(request, startAt, assumeFullGrant ?? false);
 })
-.WithSummary("Forecast duration (with P10–P90 range), failure probability and throughput for a transfer.");
+.WithSummary("Forecast duration (with P10–P90 range), failure probability, throughput and DTU-hours for a transfer.")
+.WithDescription("A transfer starting now is forecast with the DTUs its account pool can grant right now; pass assumeFullGrant=true to ignore current pool usage.");
+
+predict.MapPost("/dtus", (TransferRequest request, DateTimeOffset? startAt, bool? assumePoolAvailable, IGrainFactory grains) =>
+{
+    request.Validate();
+    return grains.GetGrain<IPredictionGrain>(0).AdviseDtusAsync(request, startAt, assumePoolAvailable ?? false);
+})
+.WithSummary("Compare DTU allocations: the fastest, the cheapest in DTU-hours, and a recommended balance.");
 
 predict.MapPost("/best-time", (BestTimeQuery query, IGrainFactory grains) =>
     grains.GetGrain<IPredictionGrain>(0).BestTimeAsync(query))
@@ -62,6 +70,14 @@ transfers.MapGet("/{id:guid}", async Task<Results<Ok<TransferStatus>, NotFound>>
     return status.Request is null ? TypedResults.NotFound() : TypedResults.Ok(status);
 })
 .WithSummary("Live status, progress and ETA of a transfer, plus its anomaly verdict once finished.");
+
+app.MapGet("/accounts/{accountId}/dtus", async Task<Results<Ok<DtuPoolStatus>, BadRequest<string>>> (string accountId, AccountTier? tier, IGrainFactory grains) =>
+{
+    if (!TransferRequest.IsValidAccountId(accountId)) return TypedResults.BadRequest("Invalid account id.");
+    return TypedResults.Ok(await grains.GetGrain<IDtuPoolGrain>(accountId).GetStatusAsync(tier));
+})
+.WithTags("Accounts")
+.WithSummary("DTU pool of an account: size, reserved, available and the active reservations.");
 
 app.MapPost("/events/batch", async (TransferEvent[] events, IGrainFactory grains) =>
 {
@@ -115,6 +131,7 @@ internal sealed class WorkSyncExceptionHandler(IProblemDetailsService problems) 
         {
             ModelNotReadyException => (StatusCodes.Status503ServiceUnavailable, "Model not ready"),
             ModelVersionNotFoundException => (StatusCodes.Status404NotFound, "Model version not found"),
+            IncompatibleModelException => (StatusCodes.Status409Conflict, "Model incompatible with this build"),
             BadHttpRequestException bad => (bad.StatusCode, "Bad request"),
             ArgumentException => (StatusCodes.Status400BadRequest, "Invalid request"),
             _ => (0, null),

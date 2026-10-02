@@ -8,8 +8,8 @@ namespace WorkSync.DataGen;
 public static class TransferRecordCsv
 {
     private const string Header =
-        "TransferId,SourceProvider,SourceRegion,DestinationProvider,DestinationRegion,TotalBytes,FileCount,Concurrency,Tier," +
-        "StartedAt,EndedAt,Failed,FailureReason,BytesTransferred,Retries,PredictedDurationSeconds,ModelVersion";
+        "TransferId,SourceProvider,SourceRegion,DestinationProvider,DestinationRegion,TotalBytes,FileCount,RequestedDtus,Tier,AccountId," +
+        "StartedAt,EndedAt,Failed,FailureReason,BytesTransferred,Retries,GrantedDtus,PoolUtilizationAtStart,PredictedDurationSeconds,ModelVersion";
 
     public static async Task WriteAsync(string path, IEnumerable<TransferRecord> records, CancellationToken ct = default)
     {
@@ -24,14 +24,17 @@ public static class TransferRecordCsv
                 q.SourceProvider, q.SourceRegion, q.DestinationProvider, q.DestinationRegion,
                 q.TotalBytes.ToString(CultureInfo.InvariantCulture),
                 q.FileCount.ToString(CultureInfo.InvariantCulture),
-                q.Concurrency.ToString(CultureInfo.InvariantCulture),
+                q.RequestedDtus.ToString(CultureInfo.InvariantCulture),
                 q.Tier,
+                q.AccountId,
                 r.StartedAt.ToString("O", CultureInfo.InvariantCulture),
                 r.EndedAt.ToString("O", CultureInfo.InvariantCulture),
                 r.Failed ? "true" : "false",
                 r.FailureReason,
                 r.BytesTransferred.ToString(CultureInfo.InvariantCulture),
                 r.Retries.ToString(CultureInfo.InvariantCulture),
+                r.GrantedDtus.ToString(CultureInfo.InvariantCulture),
+                r.PoolUtilizationAtStart.ToString("R", CultureInfo.InvariantCulture),
                 r.PredictedDurationSeconds?.ToString("R", CultureInfo.InvariantCulture) ?? "",
                 r.ModelVersion?.ToString(CultureInfo.InvariantCulture) ?? "");
             await writer.WriteLineAsync(line.AsMemory(), ct);
@@ -60,19 +63,20 @@ public static class TransferRecordCsv
     private static TransferRecord Parse(string line, int lineNo)
     {
         var f = line.Split(',');
-        if (f.Length != 17) throw new InvalidDataException($"Line {lineNo}: expected 17 fields, found {f.Length}.");
+        if (f.Length != 20) throw new InvalidDataException($"Line {lineNo}: expected 20 fields, found {f.Length}.");
         var inv = CultureInfo.InvariantCulture;
         var request = new TransferRequest(
             Enum.Parse<CloudProvider>(f[1]), Enum.Parse<CloudRegion>(f[2]),
             Enum.Parse<CloudProvider>(f[3]), Enum.Parse<CloudRegion>(f[4]),
-            long.Parse(f[5], inv), int.Parse(f[6], inv), int.Parse(f[7], inv), Enum.Parse<AccountTier>(f[8]));
+            long.Parse(f[5], inv), int.Parse(f[6], inv), int.Parse(f[7], inv), Enum.Parse<AccountTier>(f[8]), f[9]);
         return new TransferRecord(
             Guid.Parse(f[0]), request,
-            DateTimeOffset.Parse(f[9], inv, DateTimeStyles.RoundtripKind),
             DateTimeOffset.Parse(f[10], inv, DateTimeStyles.RoundtripKind),
-            bool.Parse(f[11]), Enum.Parse<FailureReason>(f[12]),
-            long.Parse(f[13], inv), int.Parse(f[14], inv),
-            f[15].Length == 0 ? null : double.Parse(f[15], inv),
-            f[16].Length == 0 ? null : int.Parse(f[16], inv));
+            DateTimeOffset.Parse(f[11], inv, DateTimeStyles.RoundtripKind),
+            bool.Parse(f[12]), Enum.Parse<FailureReason>(f[13]),
+            long.Parse(f[14], inv), int.Parse(f[15], inv),
+            int.Parse(f[16], inv), double.Parse(f[17], inv),
+            f[18].Length == 0 ? null : double.Parse(f[18], inv),
+            f[19].Length == 0 ? null : int.Parse(f[19], inv));
     }
 }

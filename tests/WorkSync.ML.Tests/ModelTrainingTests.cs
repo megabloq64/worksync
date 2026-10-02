@@ -8,7 +8,14 @@ public sealed class ModelTrainingTests(TrainedModelFixture fixture) : IClassFixt
 {
     private static readonly TransferRequest BigRequest = new(
         CloudProvider.Dropbox, CloudRegion.UsEast, CloudProvider.S3, CloudRegion.UsEast,
-        TotalBytes: 200L << 30, FileCount: 50_000, Concurrency: 8, AccountTier.Standard);
+        TotalBytes: 200L << 30, FileCount: 50_000, RequestedDtus: 8, AccountTier.Standard);
+
+    // Object store to object store with large files: throughput is DTU-bound, not API-bound.
+    private static readonly TransferRequest BulkRequest = new(
+        CloudProvider.S3, CloudRegion.UsEast, CloudProvider.AzureBlob, CloudRegion.UsEast,
+        TotalBytes: 200L << 30, FileCount: 2_000, RequestedDtus: 8, AccountTier.Enterprise);
+
+    private static readonly DateTimeOffset Night = new(2026, 9, 2, 7, 0, 0, TimeSpan.Zero); // 03:00 in New York
 
     [Fact]
     public void Duration_model_explains_most_variance()
@@ -121,6 +128,76 @@ public sealed class ModelTrainingTests(TrainedModelFixture fixture) : IClassFixt
 
         var worseAuc = better with { Failure = better.Failure with { Auc = champion.Failure.Auc - 0.1 } };
         Assert.False(ChampionChallenger.Decide(champion, worseAuc).Promote);
+    }
+
+    [Fact]
+    public void More_dtus_are_faster_with_diminishing_returns()
+    {
+        TransferForecast At(int dtus) => fixture.Predictor.Forecast(BulkRequest with { RequestedDtus = dtus }, Night);
+        var (one, eight, sixtyFour) = (At(1), At(8), At(64));
+
+        Assert.True(one.ExpectedDuration > eight.ExpectedDuration * 2, $"1 DTU {one.ExpectedDuration} vs 8 DTUs {eight.ExpectedDuration}");
+        Assert.True(eight.ExpectedDuration > sixtyFour.ExpectedDuration * 1.2, $"8 DTUs {eight.ExpectedDuration} vs 64 DTUs {sixtyFour.ExpectedDuration}");
+        // Diminishing returns: 8x the DTUs never gives 8x the speed, so the bigger allocation burns more DTU-hours.
+        Assert.True(sixtyFour.DtuHoursExpected > eight.DtuHoursExpected, $"{sixtyFour.DtuHoursExpected} vs {eight.DtuHoursExpected}");
+        Assert.Equal(64, sixtyFour.GrantedDtus);
+        Assert.Equal(64 * sixtyFour.ExpectedDuration.TotalHours, sixtyFour.DtuHoursExpected, 6);
+        Assert.True(sixtyFour.DtuHoursP10 <= sixtyFour.DtuHoursExpected && sixtyFour.DtuHoursExpected <= sixtyFour.DtuHoursP90);
+    }
+
+    [Fact]
+    public void Partial_grant_is_slower_than_full_grant()
+    {
+        var request = BulkRequest with { RequestedDtus = 64 };
+        var full = fixture.Predictor.Forecast(request, Night);
+        var partial = fixture.Predictor.Forecast(request, Night, grantedDtus: 4, poolUtilization: 0.9);
+        Assert.Equal(4, partial.GrantedDtus);
+        Assert.True(partial.ExpectedDuration > full.ExpectedDuration * 2, $"partial {partial.ExpectedDuration} vs full {full.ExpectedDuration}");
+    }
+
+    [Fact]
+    public void Dtu_advice_is_consistent()
+    {
+        var advice = DtuAdvisor.Advise(fixture.Predictor, BulkRequest, Night, poolSize: 256, poolAvailable: 256);
+
+        Assert.Equal(advice.Options.Select(o => o.Dtus).Order(), advice.Options.Select(o => o.Dtus));
+        Assert.Contains(advice.Options, o => o.Dtus == 1);
+        Assert.Contains(advice.Options, o => o.Dtus == 256);
+        Assert.Equal(advice.Options.Min(o => o.ExpectedDuration), advice.Fastest.ExpectedDuration);
+        Assert.Equal(advice.Options.Min(o => o.DtuHours), advice.MostEfficient.DtuHours);
+        Assert.True(advice.Recommended.ExpectedDuration.TotalSeconds <= advice.Fastest.ExpectedDuration.TotalSeconds * DtuAdvisor.RecommendationTolerance);
+        Assert.True(advice.Recommended.Dtus <= advice.Fastest.Dtus);
+        Assert.True(advice.MostEfficient.Dtus < advice.Fastest.Dtus, "the cheapest allocation should not also be the fastest");
+        Assert.All(advice.Options, o => Assert.True(o.AvailableNow));
+    }
+
+    [Fact]
+    public void Dtu_advice_is_capped_by_pool_and_explains_contention()
+    {
+        var advice = DtuAdvisor.Advise(fixture.Predictor, BulkRequest with { Tier = AccountTier.Standard }, Night, poolSize: 16, poolAvailable: 2);
+
+        Assert.Equal(16, advice.Options.Max(o => o.Dtus));
+        Assert.Equal(2, advice.PoolAvailable);
+        Assert.Equal(advice.Options.Where(o => o.Dtus <= 2).Select(o => o.Dtus), advice.Options.Where(o => o.AvailableNow).Select(o => o.Dtus));
+        if (!advice.Recommended.AvailableNow) Assert.Contains("partial grant", advice.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bundles_from_an_older_feature_schema_are_refused()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "worksync-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var b = fixture.Result.Bundle;
+            new ModelBundle(b.Context, b.Duration, b.Failure, b.Throughput, b.Manifest with { FeatureSchemaVersion = 1 }).Save(dir);
+            Assert.False(ModelBundle.IsCompatible(ModelBundle.ReadManifest(dir)));
+            Assert.Throws<IncompatibleModelException>(() => ModelBundle.Load(dir));
+            Assert.Equal(FeatureBuilder.SchemaVersion, b.Manifest.FeatureSchemaVersion);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]

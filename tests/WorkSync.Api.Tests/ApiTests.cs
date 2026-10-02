@@ -55,6 +55,8 @@ public sealed class ApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
         destinationRegion = "EuWest",
         totalBytes = 10L << 30,
         fileCount = 500,
+        requestedDtus = 8,
+        accountId = "acct-api",
     };
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -102,6 +104,19 @@ public sealed class ApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
         Assert.Equal(HttpStatusCode.OK, best.StatusCode);
         Assert.Equal(2, (await best.Content.ReadFromJsonAsync<JsonElement>(Ct)).GetProperty("bestSlots").GetArrayLength());
 
+        Assert.Equal(8, body.GetProperty("grantedDtus").GetInt32());
+        Assert.True(body.GetProperty("dtuHoursExpected").GetDouble() > 0);
+
+        var dtuAdvice = await http.PostAsJsonAsync("/predict/dtus?assumePoolAvailable=true", Request, Ct);
+        Assert.Equal(HttpStatusCode.OK, dtuAdvice.StatusCode);
+        var advice = await dtuAdvice.Content.ReadFromJsonAsync<JsonElement>(Ct);
+        Assert.Equal(16, advice.GetProperty("poolSize").GetInt32());
+        Assert.True(advice.GetProperty("options").GetArrayLength() > 1);
+        Assert.InRange(advice.GetProperty("recommended").GetProperty("dtus").GetInt32(), 1, 16);
+
+        var tooMany = await http.PostAsJsonAsync("/predict/dtus", new { sourceProvider = "S3", sourceRegion = "UsEast", destinationProvider = "S3", destinationRegion = "UsEast", totalBytes = 1000, fileCount = 1, requestedDtus = 1000 }, Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, tooMany.StatusCode);
+
         var models = await http.GetFromJsonAsync<JsonElement>("/models", Ct);
         Assert.Equal(1, models.GetArrayLength());
 
@@ -111,6 +126,13 @@ public sealed class ApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
         var status = await http.GetAsync(started.Headers.Location, Ct);
         Assert.Equal(HttpStatusCode.OK, status.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"/transfers/{Guid.NewGuid()}", Ct)).StatusCode);
+
+        // The transfer drew on its account's DTU pool.
+        var transfer = await status.Content.ReadFromJsonAsync<JsonElement>(Ct);
+        Assert.Equal(8, transfer.GetProperty("dtus").GetProperty("granted").GetInt32());
+        var pool = await http.GetFromJsonAsync<JsonElement>("/accounts/acct-api/dtus", Ct);
+        Assert.Equal(16, pool.GetProperty("poolSize").GetInt32());
+        Assert.Equal(HttpStatusCode.BadRequest, (await http.GetAsync("/accounts/bad%20id!/dtus", Ct)).StatusCode);
 
         Assert.Equal(HttpStatusCode.NotFound, (await http.PostAsync("/models/99/rollback", null, Ct)).StatusCode);
     }

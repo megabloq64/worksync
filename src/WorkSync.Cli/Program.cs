@@ -54,9 +54,16 @@ train.SetAction(async (r, ct) =>
     ModelMetrics? champion = null;
     if (await registry.GetCurrentVersionAsync(ct) is { } current)
     {
-        champion = ModelEvaluator.Evaluate(await registry.LoadAsync(current, ct), trained.Holdout);
-        Console.WriteLine($"Champion v{current} on the same holdout:");
-        Fmt.Metrics(champion);
+        try
+        {
+            champion = ModelEvaluator.Evaluate(await registry.LoadAsync(current, ct), trained.Holdout);
+            Console.WriteLine($"Champion v{current} on the same holdout:");
+            Fmt.Metrics(champion);
+        }
+        catch (IncompatibleModelException ex)
+        {
+            Console.WriteLine($"Ignoring champion v{current}: {ex.Message}");
+        }
     }
     var decision = ChampionChallenger.Decide(champion, challenger);
     var version = await registry.PublishAsync(trained.Bundle, ct);
@@ -81,14 +88,32 @@ root.Subcommands.Add(evaluate);
 
 // ---- predict / best-time ---------------------------------------------------------------------------------------
 var startOption = new Option<DateTimeOffset?>("--start") { Description = "Planned start (default: now)" };
-var predict = new Command("predict", "Forecast duration (P10–P90), failure risk and throughput for a transfer.") { versionOption, startOption };
+var grantedOption = new Option<int?>("--granted") { Description = "DTUs actually granted if the pool is busy (default: all requested)" };
+var utilizationOption = new Option<double>("--pool-utilization") { Description = "Fraction of the pool already reserved at start (0-1)" };
+var predict = new Command("predict", "Forecast duration (P10–P90), failure risk, throughput and DTU-hours for a transfer.")
+{
+    versionOption, startOption, grantedOption, utilizationOption,
+};
 request.AddTo(predict);
 predict.SetAction(async (r, ct) =>
 {
     var predictor = await LoadPredictorAsync(r, ct);
-    Fmt.Forecast(predictor.Forecast(request.Bind(r), r.GetValue(startOption) ?? DateTimeOffset.UtcNow));
+    Fmt.Forecast(predictor.Forecast(request.Bind(r), r.GetValue(startOption) ?? DateTimeOffset.UtcNow,
+        r.GetValue(grantedOption), Math.Clamp(r.GetValue(utilizationOption), 0, 1)));
 });
 root.Subcommands.Add(predict);
+
+var availableOption = new Option<int?>("--available") { Description = "DTUs free in the pool right now (default: the whole pool for the tier)" };
+var dtuAdvice = new Command("dtu-advice", "Compare DTU allocations: fastest, cheapest in DTU-hours, and recommended.") { versionOption, startOption, availableOption };
+request.AddTo(dtuAdvice);
+dtuAdvice.SetAction(async (r, ct) =>
+{
+    var predictor = await LoadPredictorAsync(r, ct);
+    var transfer = request.Bind(r);
+    var poolSize = Dtu.DefaultPoolSize(transfer.Tier);
+    Fmt.DtuAdvice(DtuAdvisor.Advise(predictor, transfer, r.GetValue(startOption) ?? DateTimeOffset.UtcNow, poolSize, r.GetValue(availableOption) ?? poolSize));
+});
+root.Subcommands.Add(dtuAdvice);
 
 var horizonOption = new Option<int>("--horizon") { Description = "Hours ahead to consider", DefaultValueFactory = _ => 72 };
 var topOption = new Option<int>("--top") { Description = "Number of suggestions", DefaultValueFactory = _ => 5 };
@@ -176,11 +201,13 @@ simulate.SetAction((r, ct) => WithClusterAsync(async grains =>
     using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1 / Math.Max(0.1, r.GetValue(rateOption))));
     var started = 0;
     var anomalies = 0;
+    var partial = 0;
     var pending = new List<Guid>();
     while (started < count && await timer.WaitForNextTickAsync(ct))
     {
         var id = Guid.NewGuid();
-        await grains.GetGrain<ITransferGrain>(id).StartAsync(generator.NextRequest());
+        var started0 = await grains.GetGrain<ITransferGrain>(id).StartAsync(generator.NextRequest());
+        if (started0.Dtus is { IsPartial: true }) partial++;
         pending.Add(id);
         if (++started % 100 == 0) Console.WriteLine($"{started} started");
     }
@@ -189,13 +216,24 @@ simulate.SetAction((r, ct) => WithClusterAsync(async grains =>
         var s = await grains.GetGrain<ITransferGrain>(id).GetStatusAsync();
         if (s.Anomaly?.IsSlowAnomaly == true) anomalies++;
     }
-    Console.WriteLine($"Started {started} transfers; {anomalies} flagged as slow so far (others may still be running).");
+    Console.WriteLine($"Started {started} transfers ({partial} got a partial DTU grant); {anomalies} flagged as slow so far (others may still be running).");
+    Console.WriteLine($"Simulated accounts: {string.Join(", ", generator.Accounts.Take(5).Select(a => $"{a.AccountId} ({a.Tier})"))}… — inspect with 'cluster dtus <account>'.");
 }, ct));
 
 cluster.Subcommands.Add(status);
 cluster.Subcommands.Add(run);
 cluster.Subcommands.Add(clusterRollback);
+var accountArgument = new Argument<string>("account") { Description = "Account id" };
+var dtus = new Command("dtus", "Show an account's DTU pool and active reservations.") { accountArgument };
+dtus.SetAction((r, ct) => WithClusterAsync(async grains =>
+{
+    var account = r.GetValue(accountArgument)!;
+    if (!TransferRequest.IsValidAccountId(account)) throw new ArgumentException($"Invalid account id '{account}'.");
+    Fmt.Pool(await grains.GetGrain<IDtuPoolGrain>(account).GetStatusAsync());
+}, ct));
+
 cluster.Subcommands.Add(simulate);
+cluster.Subcommands.Add(dtus);
 root.Subcommands.Add(cluster);
 
 try

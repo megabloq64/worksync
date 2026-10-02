@@ -29,7 +29,8 @@ public sealed record BundleManifest(
     double AnomalyScale,
     double AnomalyThreshold,
     double TrainingMeanLogBytes,
-    string Notes = "");
+    string Notes = "",
+    int FeatureSchemaVersion = 1);
 
 [GenerateSerializer, Immutable, Alias("worksync.ModelVersionInfo")]
 public sealed record ModelVersionInfo(int Version, DateTimeOffset PublishedAt, BundleManifest Manifest, bool IsCurrent);

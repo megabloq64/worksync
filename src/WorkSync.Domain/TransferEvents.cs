@@ -11,8 +11,9 @@ public sealed record TransferRequest(
     CloudRegion DestinationRegion,
     long TotalBytes,
     int FileCount,
-    int Concurrency = 4,
-    AccountTier Tier = AccountTier.Standard)
+    int RequestedDtus = 8,
+    AccountTier Tier = AccountTier.Standard,
+    string AccountId = "default")
 {
     [JsonIgnore]
     public double AverageFileSizeBytes => FileCount <= 0 ? TotalBytes : (double)TotalBytes / FileCount;
@@ -20,11 +21,18 @@ public sealed record TransferRequest(
     [JsonIgnore]
     public RegionDistance Distance => Regions.DistanceBetween(SourceRegion, DestinationRegion);
 
+    /// <summary>1-128 characters of ASCII letters, digits, '-', '_', '.', ':' or '@' (account ids are grain keys and URL segments).</summary>
+    public static bool IsValidAccountId(string? accountId) =>
+        !string.IsNullOrEmpty(accountId) && accountId.Length <= 128 &&
+        accountId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' or ':' or '@');
+
     public void Validate()
     {
         if (TotalBytes <= 0) throw new ArgumentOutOfRangeException(nameof(TotalBytes), "TotalBytes must be positive.");
         if (FileCount <= 0) throw new ArgumentOutOfRangeException(nameof(FileCount), "FileCount must be positive.");
-        if (Concurrency is < 1 or > 256) throw new ArgumentOutOfRangeException(nameof(Concurrency), "Concurrency must be between 1 and 256.");
+        if (RequestedDtus is < 1 or > Dtu.MaxPerTransfer) throw new ArgumentOutOfRangeException(nameof(RequestedDtus), $"RequestedDtus must be between 1 and {Dtu.MaxPerTransfer}.");
+        if (!IsValidAccountId(AccountId))
+            throw new ArgumentException("AccountId must be 1-128 characters of letters, digits, '-', '_', '.', ':' or '@'.", nameof(AccountId));
         if (!Enum.IsDefined(SourceProvider) || !Enum.IsDefined(DestinationProvider)) throw new ArgumentException("Unknown provider.");
         if (!Enum.IsDefined(SourceRegion) || !Enum.IsDefined(DestinationRegion)) throw new ArgumentException("Unknown region.");
         if (!Enum.IsDefined(Tier)) throw new ArgumentException("Unknown tier.");
@@ -52,7 +60,9 @@ public sealed record TransferStarted(
     DateTimeOffset Timestamp,
     TransferRequest Request,
     double? PredictedDurationSeconds = null,
-    int? ModelVersion = null) : TransferEvent(EventId, TransferId, Sequence, Timestamp);
+    int? ModelVersion = null,
+    int? GrantedDtus = null,
+    double? PoolUtilizationAtStart = null) : TransferEvent(EventId, TransferId, Sequence, Timestamp);
 
 [GenerateSerializer, Immutable, Alias("worksync.TransferProgress")]
 public sealed record TransferProgress(

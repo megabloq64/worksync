@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using Orleans.Concurrency;
 using WorkSync.Domain;
 using WorkSync.ML;
@@ -5,10 +6,39 @@ using WorkSync.ML;
 namespace WorkSync.Grains;
 
 [StatelessWorker]
-public sealed class PredictionGrain(ModelHost models, TimeProvider clock) : Grain, IPredictionGrain
+public sealed class PredictionGrain(ModelHost models, IOptions<WorkSyncGrainOptions> options, TimeProvider clock) : Grain, IPredictionGrain
 {
-    public Task<TransferForecast> ForecastAsync(TransferRequest request, DateTimeOffset? startUtc = null) =>
-        Task.FromResult(models.Require().Forecast(request, startUtc ?? clock.GetUtcNow()));
+    /// <summary>Pool availability only says something about transfers starting about now.</summary>
+    private static readonly TimeSpan PoolRelevance = TimeSpan.FromMinutes(5);
+
+    public async Task<TransferForecast> ForecastAsync(TransferRequest request, DateTimeOffset? startUtc = null, bool assumeFullGrant = false)
+    {
+        request.Validate();
+        var predictor = models.Require();
+        var now = clock.GetUtcNow();
+        var start = startUtc ?? now;
+        if (assumeFullGrant || (start - now).Duration() > PoolRelevance) return predictor.Forecast(request, start);
+
+        var pool = await PoolAsync(request);
+        return predictor.Forecast(request, start, Math.Min(request.RequestedDtus, pool.Available), pool.Utilization);
+    }
+
+    public async Task<DtuAdvice> AdviseDtusAsync(TransferRequest request, DateTimeOffset? startUtc = null, bool assumePoolAvailable = false)
+    {
+        request.Validate();
+        var predictor = models.Require();
+        var start = startUtc ?? clock.GetUtcNow();
+        if (assumePoolAvailable)
+        {
+            var size = options.Value.PoolSizeFor(request.Tier);
+            return DtuAdvisor.Advise(predictor, request, start, size, size);
+        }
+        var pool = await PoolAsync(request);
+        return DtuAdvisor.Advise(predictor, request, start, pool.PoolSize, pool.Available);
+    }
+
+    private Task<DtuPoolStatus> PoolAsync(TransferRequest request) =>
+        GrainFactory.GetGrain<IDtuPoolGrain>(request.AccountId).GetStatusAsync(request.Tier);
 
     public Task<BestTimeAdvice> BestTimeAsync(BestTimeQuery query)
     {

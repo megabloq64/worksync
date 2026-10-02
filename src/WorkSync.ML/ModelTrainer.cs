@@ -116,7 +116,7 @@ public sealed class ModelTrainer(TrainingSettings? settings = null)
         var partial = new ModelBundle(ctx, duration, failure, throughput, new BundleManifest(
             clock, train.Length, ordered[0].EndedAt, ordered[^1].EndedAt,
             Metrics: null!, Quantile(residuals, 0.10), Quantile(residuals, 0.90), center, scale, anomalyThreshold,
-            TrainingMeanLogBytes: allRows.Average(r => r.LogBytes), notes));
+            TrainingMeanLogBytes: allRows.Average(r => r.LogBytes), notes, FeatureBuilder.SchemaVersion));
 
         var metrics = ModelEvaluator.Evaluate(partial, holdout);
         var bundle = new ModelBundle(ctx, duration, failure, throughput, partial.Manifest with { Metrics = metrics });

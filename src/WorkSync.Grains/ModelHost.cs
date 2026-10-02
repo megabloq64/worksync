@@ -13,6 +13,7 @@ namespace WorkSync.Grains;
 public sealed partial class ModelHost(IModelRegistry registry, ILogger<ModelHost> logger) : IDisposable
 {
     private readonly SemaphoreSlim _loadLock = new(1, 1);
+    private readonly HashSet<int> _incompatible = [];
     private volatile TransferPredictor? _current;
 
     public TransferPredictor? Current => _current;
@@ -30,7 +31,19 @@ public sealed partial class ModelHost(IModelRegistry registry, ILogger<ModelHost
         try
         {
             if (_current?.Version == version) return version;
-            var bundle = await registry.LoadAsync(version, ct).ConfigureAwait(false);
+            if (_incompatible.Contains(version)) return _current?.Version;
+            ModelBundle bundle;
+            try
+            {
+                bundle = await registry.LoadAsync(version, ct).ConfigureAwait(false);
+            }
+            catch (IncompatibleModelException ex)
+            {
+                // Trained on an older feature schema: keep serving whatever we have until a compatible model is promoted.
+                _incompatible.Add(version);
+                LogIncompatible(ex, version);
+                return _current?.Version;
+            }
             _current = new TransferPredictor(bundle, version);
             LogLoaded(version, bundle.Manifest.Metrics.Duration.RSquared);
         }
@@ -52,6 +65,9 @@ public sealed partial class ModelHost(IModelRegistry registry, ILogger<ModelHost
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Loaded model v{Version} (duration R² {RSquared:F3})")]
     private partial void LogLoaded(int version, double rSquared);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Model v{Version} is incompatible with this build and was skipped")]
+    private partial void LogIncompatible(Exception ex, int version);
 }
 
 /// <summary>Loads the current model at startup and keeps polling as a safety net for missed pushes.</summary>

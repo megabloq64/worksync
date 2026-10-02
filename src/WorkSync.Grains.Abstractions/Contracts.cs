@@ -56,7 +56,8 @@ public sealed record TransferStatus(
     TransferForecast? Forecast,
     DateTimeOffset? LiveEstimatedCompletion,
     FailureReason FailureReason,
-    AnomalyResult? Anomaly);
+    AnomalyResult? Anomaly,
+    DtuGrant? Dtus);
 
 [GenerateSerializer, Immutable, Alias("worksync.TrainingStatsDelta")]
 public sealed record TrainingStatsDelta(
@@ -100,10 +101,56 @@ public sealed record TrainingStatus(
     DateTimeOffset? NextScheduledCheck,
     IReadOnlyList<TrainingRunInfo> History);
 
+/// <summary>Result of reserving DTUs for a transfer. <see cref="Granted"/> may be less than requested (or 0) when the pool is busy.</summary>
+[GenerateSerializer, Immutable, Alias("worksync.DtuGrant")]
+public sealed record DtuGrant(Guid TransferId, int Requested, int Granted, double UtilizationBefore, int PoolSize)
+{
+    public bool IsPartial => Granted < Requested;
+}
+
+[GenerateSerializer, Immutable, Alias("worksync.DtuReservation")]
+public sealed record DtuReservation(Guid TransferId, int Requested, int Granted, double UtilizationBefore, DateTimeOffset ReservedAt, DateTimeOffset LeaseExpiresAt);
+
+[GenerateSerializer, Immutable, Alias("worksync.DtuPoolStatus")]
+public sealed record DtuPoolStatus(
+    string AccountId,
+    AccountTier Tier,
+    int PoolSize,
+    int Reserved,
+    int Available,
+    double Utilization,
+    IReadOnlyList<DtuReservation> Reservations);
+
+/// <summary>
+/// An account's DTU pool (key = account id). Transfers reserve DTUs for their lifetime and release them when they
+/// finish; reservations carry a lease so DTUs held by a crashed transfer are reclaimed automatically.
+/// </summary>
+public interface IDtuPoolGrain : IGrainWithStringKey
+{
+    /// <summary>Grants min(requested, available) DTUs. Idempotent per transfer: repeating the call returns the original grant.</summary>
+    Task<DtuGrant> ReserveAsync(Guid transferId, int requestedDtus, AccountTier tier, TimeSpan lease);
+
+    /// <summary>Extends a reservation's lease (e.g. once the transfer knows how long it will run).</summary>
+    Task<bool> RenewAsync(Guid transferId, TimeSpan lease);
+
+    Task<bool> ReleaseAsync(Guid transferId);
+
+    /// <param name="tier">Size the pool for this tier (the account's tier is otherwise remembered from its last reservation).</param>
+    Task<DtuPoolStatus> GetStatusAsync(AccountTier? tier = null);
+}
+
 /// <summary>Stateless, horizontally scaled scoring endpoint. Uses whatever model the local silo has loaded.</summary>
 public interface IPredictionGrain : IGrainWithIntegerKey
 {
-    Task<TransferForecast> ForecastAsync(TransferRequest request, DateTimeOffset? startUtc = null);
+    /// <summary>
+    /// Forecasts a transfer. Unless <paramref name="assumeFullGrant"/> is set, a transfer starting now is forecast
+    /// with the DTUs its account pool could actually grant right now.
+    /// </summary>
+    Task<TransferForecast> ForecastAsync(TransferRequest request, DateTimeOffset? startUtc = null, bool assumeFullGrant = false);
+
+    /// <summary>Compares DTU allocations for a transfer; <paramref name="assumePoolAvailable"/> ignores current reservations.</summary>
+    Task<DtuAdvice> AdviseDtusAsync(TransferRequest request, DateTimeOffset? startUtc = null, bool assumePoolAvailable = false);
+
     Task<BestTimeAdvice> BestTimeAsync(BestTimeQuery query);
     Task<AnomalyResult> ScoreAnomalyAsync(TransferRecord record);
     Task<int?> GetLoadedVersionAsync();
