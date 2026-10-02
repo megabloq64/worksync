@@ -9,7 +9,7 @@ public sealed class ModelBundle(MLContext context, ITransformer duration, ITrans
     public const string ManifestFile = "manifest.json";
     public static readonly string[] ModelFiles = ["duration.zip", "failure.zip", "throughput.zip"];
 
-    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public MLContext Context { get; } = context;
     public ITransformer Duration { get; } = duration;

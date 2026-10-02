@@ -1,9 +1,10 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Orleans.Sdk" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\WorkSync.Domain\WorkSync.Domain.csproj" />
+    <ProjectReference Include="..\WorkSync.ML\WorkSync.ML.csproj" />
   </ItemGroup>
 </Project>

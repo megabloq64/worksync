@@ -1,0 +1,23 @@
+{
+  "profiles": {
+    "WorkSync.Silo": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+    "Silo2 (dev, joins primary)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "WorkSync__Silo__SiloPort": "11112",
+        "WorkSync__Silo__GatewayPort": "30001",
+        "WorkSync__Silo__PrimarySiloEndpoint": "127.0.0.1:11111",
+        "WorkSync__Silo__IsTrainer": "false",
+        "WorkSync__EventStore__Embedded": "false",
+        "WorkSync__EventStore__ConnectionString": "127.0.0.1:6380",
+        "WorkSync__Seed__Records": "0"
+      }
+    }
+  }
+}
